@@ -1,198 +1,128 @@
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.GuildMembers,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildModeration // Necesar pentru ban-uri, kick-uri și timeout-uri
+        GatewayIntentBits.GuildMembers
     ]
 });
 
-const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
+const DATA_FILE = path.join(__dirname, 'warns.json');
 
-client.once('ready', () => {
-    console.log(`Botul este online ca ${client.user.tag}!`);
-});
-
-// Funcție ajutătoare pentru trimiterea log-urilor
-function sendLog(guild, embed) {
-    const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
-    if (logChannel) logChannel.send({ embeds: [embed] });
+// Funcție pentru a citi warn-urile din fișier
+function loadWarns() {
+    if (!fs.existsSync(DATA_FILE)) {
+        return {};
+    }
+    try {
+        return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    } catch (e) {
+        return {};
+    }
 }
 
-// 1. Mesaj Șters
-client.on('messageDelete', async (message) => {
-    if (!message.guild || message.author?.bot) return;
+// Funcție pentru a salva warn-urile în fișier
+function saveWarns(data) {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 4), 'utf8');
+}
 
-    const embed = new EmbedBuilder()
-        .setTitle('🗑️ Mesaj Șters')
-        .setColor('#ff0000')
-        .addFields(
-            { name: 'Autor', value: `${message.author.tag} (<@${message.author.id}>)`, inline: true },
-            { name: 'Canal', value: `<#${message.channel.id}>`, inline: true },
-            { name: 'Conținut', value: message.content || '[Fără text / Doar atașament]' }
-        )
-        .setTimestamp();
-
-    sendLog(message.guild, embed);
+client.once('ready', () => {
+    console.log(`Botul de warn-uri este online ca ${client.user.tag}!`);
 });
 
-// 2. Membru Nou
-client.on('guildMemberAdd', (member) => {
-    const embed = new EmbedBuilder()
-        .setTitle('📥 Membru Nou')
-        .setColor('#00ff00')
-        .setDescription(`Bun venit, ${member} (${member.user.tag})!`)
-        .setThumbnail(member.user.displayAvatarURL())
-        .setTimestamp();
+client.on('messageCreate', async (message) => {
+    if (message.author.bot || !message.guild) return;
 
-    sendLog(member.guild, embed);
-});
+    const prefix = '!';
+    if (!message.content.startsWith(prefix)) return;
 
-// 3. Membru Părăsit Serverul
-client.on('guildMemberRemove', (member) => {
-    const embed = new EmbedBuilder()
-        .setTitle('📤 Membru Părăsit Serverul')
-        .setColor('#ffa500')
-        .setDescription(`${member.user.tag} a părăsit serverul.`)
-        .setTimestamp();
+    const args = message.content.slice(prefix.length).trim().split(/ +/);
+    const command = args.shift().toLowerCase();
 
-    sendLog(member.guild, embed);
-});
+    // Comanda: !warn @utilizator motiv
+    if (command === 'warn') {
+        // Verificăm dacă cel care dă comanda are permisiuni de moderare (Administrator sau Kick/Ban)
+        if (!message.member.permissions.has('KickMembers') && !message.member.permissions.has('Administrator')) {
+            return message.reply('❌ Nu ai permisiunea de a folosi această comandă!');
+        }
 
-// 4. Canal Creat
-client.on('channelCreate', (channel) => {
-    if (!channel.guild) return;
-    const embed = new EmbedBuilder()
-        .setTitle('📁 Canal Creat')
-        .setColor('#0099ff')
-        .setDescription(`Canalul **${channel.name}** a fost creat.`)
-        .setTimestamp();
+        const targetUser = message.mentions.users.first() || message.guild.members.cache.get(args[0])?.user;
+        if (!targetUser) {
+            return message.reply('❌ Te rog să menționezi un utilizator valid! Exemplu: `!warn @Nume motiv`');
+        }
 
-    sendLog(channel.guild, embed);
-});
+        const reason = args.slice(1).join(' ') || 'Fără motiv specificat';
 
-// 5. Canal Șters
-client.on('channelDelete', (channel) => {
-    if (!channel.guild) return;
-    const embed = new EmbedBuilder()
-        .setTitle('🗑️ Canal Șters')
-        .setColor('#ff3300')
-        .setDescription(`Canalul **${channel.name}** a fost șters.`)
-        .setTimestamp();
+        // Încărcăm baza de date cu warn-uri
+        let warnsData = loadWarns();
+        const guildId = message.guild.id;
+        const userId = targetUser.id;
 
-    sendLog(channel.guild, embed);
-});
+        if (!warnsData[guildId]) {
+            warnsData[guildId] = {};
+        }
+        if (!warnsData[guildId][userId]) {
+            warnsData[guildId][userId] = [];
+        }
 
-// 6. Actualizare Canal (ex: schimbare nume, topic)
-client.on('channelUpdate', (oldChannel, newChannel) => {
-    if (!newChannel.guild) return;
-    if (oldChannel.name === newChannel.name) return; // Ignorăm dacă nu s-a schimbat numele
+        // Adăugăm noul warn
+        warnsData[guildId][userId].push({
+            reason: reason,
+            moderator: message.author.tag,
+            date: new Date().toLocaleDateString('ro-RO')
+        });
 
-    const embed = new EmbedBuilder()
-        .setTitle('✏️ Canal Actualizat')
-        .setColor('#ffcc00')
-        .setDescription(`Canalul <#${newChannel.id}> a fost modificat.`)
-        .addFields(
-            { name: 'Nume vechi', value: oldChannel.name, inline: true },
-            { name: 'Nume nou', value: newChannel.name, inline: true }
-        )
-        .setTimestamp();
+        saveWarns(warnsData);
 
-    sendLog(newChannel.guild, embed);
-});
+        const totalWarns = warnsData[guildId][userId].length;
 
-// 7. Rol Creat
-client.on('roleCreate', (role) => {
-    const embed = new EmbedBuilder()
-        .setTitle('🛡️ Rol Creat')
-        .setColor('#33cc33')
-        .setDescription(`Rolul **${role.name}** a fost creat.`)
-        .setTimestamp();
-
-    sendLog(role.guild, embed);
-});
-
-// 8. Rol Șters
-client.on('roleDelete', (role) => {
-    const embed = new EmbedBuilder()
-        .setTitle('🛡️ Rol Șters')
-        .setColor('#cc3333')
-        .setDescription(`Rolul **${role.name}** a fost șters.`)
-        .setTimestamp();
-
-    sendLog(role.guild, embed);
-});
-
-// 9. Actualizare Rol (ex: schimbare nume sau culoare)
-client.on('roleUpdate', (oldRole, newRole) => {
-    if (oldRole.name === newRole.name) return;
-
-    const embed = new EmbedBuilder()
-        .setTitle('✏️ Rol Actualizat')
-        .setColor('#ffcc00')
-        .setDescription(`Rolul **${newRole.name}** a fost modificat.`)
-        .addFields(
-            { name: 'Nume vechi', value: oldRole.name, inline: true },
-            { name: 'Nume nou', value: newRole.name, inline: true }
-        )
-        .setTimestamp();
-
-    sendLog(newRole.guild, embed);
-});
-
-// 10. Actualizare Membru (ex: primit/pierdut un rol, schimbat porecla)
-client.on('guildMemberUpdate', (oldMember, newMember) => {
-    const guild = newMember.guild;
-
-    // Verificăm dacă i s-au schimbat rolurile
-    const addedRoles = newMember.roles.cache.filter(role => !oldMember.roles.cache.has(role.id));
-    const removedRoles = oldMember.roles.cache.filter(role => !newMember.roles.cache.has(role.id));
-
-    if (addedRoles.size > 0) {
-        const roleNames = addedRoles.map(r => r.name).join(', ');
+        // Creăm Embed-ul de confirmare
         const embed = new EmbedBuilder()
-            .setTitle('➕ Rol Adăugat unui Membru')
-            .setColor('#00ffcc')
-            .setDescription(`Utilizatorului **${newMember.user.tag}** i s-a adăugat rolul: **${roleNames}**.`)
+            .setTitle('⚠️ Utilizator Avertizat (Warn)')
+            .setColor('#ffaa00')
+            .addFields(
+                { name: 'Utilizator', value: `${targetUser.tag} (<@${targetUser.id}>)`, inline: true },
+                { name: 'Moderator', value: message.author.tag, inline: true },
+                { name: 'Total Avertismente', value: `${totalWarns}`, inline: true },
+                { name: 'Motiv', value: reason }
+            )
             .setTimestamp();
-        sendLog(guild, embed);
+
+        await message.channel.send({ embeds: [embed] });
     }
 
-    if (removedRoles.size > 0) {
-        const roleNames = removedRoles.map(r => r.name).join(', ');
+    // Comanda: !warns @utilizator
+    if (command === 'warns') {
+        const targetUser = message.mentions.users.first() || message.guild.members.cache.get(args[0])?.user || message.author;
+
+        let warnsData = loadWarns();
+        const guildId = message.guild.id;
+        const userId = targetUser.id;
+
+        const userWarns = warnsData[guildId]?.[userId] || [];
+        const totalWarns = userWarns.length;
+
         const embed = new EmbedBuilder()
-            .setTitle('➖ Rol Scoat de la un Membru')
-            .setColor('#ff9933')
-            .setDescription(`Utilizatorului **${newMember.user.tag}** i s-a scos rolul: **${roleNames}**.`)
-            .setTimestamp();
-        sendLog(guild, embed);
+            .setTitle(`📋 Istoric Avertismente pentru ${targetUser.tag}`)
+            .setColor('#3498db')
+            .setDescription(`Acest utilizator are un total de **${totalWarns}** avertismente.`);
+
+        if (totalWarns > 0) {
+            // Luăm ultimele 5 warn-uri să le afișăm frumos
+            const recentWarns = userWarns.slice(-5).map((w, index) => 
+                `**#${index + 1}** | Motiv: *${w.reason}* | Moderator: ${w.moderator} (${w.date})`
+            ).join('\n');
+
+            embed.addFields({ name: 'Ultimele avertismente:', value: recentWarns });
+        }
+
+        await message.channel.send({ embeds: [embed] });
     }
-
-    // Verificăm dacă a primit Timeout (Mute temporar)
-    if (!oldMember.communicationDisabledUntil && newMember.communicationDisabledUntil) {
-        const embed = new EmbedBuilder()
-            .setTitle('🔇 Membru pus pe Mute (Timeout)')
-            .setColor('#ff0066')
-            .setDescription(`Utilizatorul **${newMember.user.tag}** a primit timeout.`)
-            .setTimestamp();
-        sendLog(guild, embed);
-    }
-});
-
-// 11. Membru Banat
-client.on('guildBanAdd', (ban) => {
-    const embed = new EmbedBuilder()
-        .setTitle('🔨 Membru Banat')
-        .setColor('#990000')
-        .setDescription(`Utilizatorul **${ban.user.tag}** a primit ban pe server.`)
-        .setTimestamp();
-
-    sendLog(ban.guild, embed);
 });
 
 client.login(process.env.TOKEN);
-    
