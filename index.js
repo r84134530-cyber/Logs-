@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
@@ -8,8 +8,7 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.GuildMessageReactions
+        GatewayIntentBits.GuildMembers
     ]
 });
 
@@ -29,6 +28,10 @@ function loadWarns() {
 function saveWarns(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 4), 'utf8');
 }
+
+// Ținem evidența participanților la giveaway-uri direct în memorie
+// Structură: { messageId: Set([userId1, userId2, ...]) }
+const giveawayParticipants = {};
 
 client.once('ready', () => {
     console.log(`Botul multifuncțional este online ca ${client.user.tag}!`);
@@ -160,11 +163,9 @@ client.on('messageCreate', async (message) => {
         await message.channel.send({ embeds: [embed] });
     }
 
-    // ================= SISTEMUL DE GIVEAWAY (CU ORE SAU MINUTE) =================
+    // ================= SISTEMUL DE GIVEAWAY CU BUTON =================
     
-    // Exemplu de utilizare: 
-    // !giveaway 2h 500 Robux  (pentru 2 ore)
-    // !giveaway 30m Nitro     (pentru 30 de minute)
+    // Exemplu: !giveaway 1h 500 Robux  (sau 30m)
     if (command === 'giveaway') {
         if (!message.member.permissions.has('Administrator') && !message.member.permissions.has('ManageMessages')) {
             return message.reply('❌ Nu ai permisiunea de a crea giveaway-uri!');
@@ -174,7 +175,7 @@ client.on('messageCreate', async (message) => {
         const prize = args.slice(1).join(' ');
 
         if (!timeArg || !prize) {
-            return message.reply('❌ Format incorect! Folosește: `!giveaway [timp] [premiu]`. Exemplu: `!giveaway 2h 500 Robux` sau `!giveaway 30m Nitro`');
+            return message.reply('❌ Format incorect! Folosește: `!giveaway [timp] [premiu]`. Exemplu: `!giveaway 1h 500 Robux` sau `!giveaway 30m Nitro`');
         }
 
         let durationMs = 0;
@@ -186,27 +187,39 @@ client.on('messageCreate', async (message) => {
         }
 
         if (unit === 'h') {
-            durationMs = value * 60 * 60 * 1000; // ore în milisecunde
+            durationMs = value * 60 * 60 * 1000;
         } else if (unit === 'm') {
-            durationMs = value * 60 * 1000; // minute în milisecunde
+            durationMs = value * 60 * 1000;
         } else {
-            return message.reply('❌ Specifică unitatea de măsură: `h` pentru ore sau `m` pentru minute (Exemplu: `1h` sau `15m`).');
+            return message.reply('❌ Specifică unitatea: `h` pentru ore sau `m` pentru minute (Exemplu: `1h` sau `30m`).');
         }
 
         await message.delete().catch(() => {});
 
+        // Creăm setul de participanți pentru acest mesaj nou
+        // (Vom folosi un ID unic generat automat de mesaj după trimitere, dar pentru început pregătim rândul cu butonul)
         const giveawayEmbed = new EmbedBuilder()
             .setTitle('🎉 GIVEAWAY 🎉')
             .setColor('#e74c3c')
-            .setDescription(`Premiu: **${prize}**\n\nReacționează cu 🎉 pentru a participa!\nDurată: **${timeArg}**`)
+            .setDescription(`Premiu: **${prize}**\n\nApasă pe butonul de mai jos pentru a participa!\nDurată: **${timeArg}**\nParticipanți: **0**`)
             .setFooter({ text: `Creat de ${message.author.tag}` })
             .setTimestamp();
 
-        const giveawayMessage = await message.channel.send({ embeds: [giveawayEmbed] });
-        await giveawayMessage.react('🎉');
+        const enterButton = new ButtonBuilder()
+            .setCustomId('enter_giveaway')
+            .setLabel('Participă 🎉')
+            .setStyle(ButtonStyle.Success);
+
+        const row = new ActionRowBuilder().addComponents(enterButton);
+
+        const giveawayMessage = await message.channel.send({ embeds: [giveawayEmbed], components: [row] });
+        
+        // Inițializăm lista de participanți pentru mesajul trimis
+        giveawayParticipants[giveawayMessage.id] = new Set();
 
         const endTime = Date.now() + durationMs;
 
+        // Timer-ul care oprește giveaway-ul la final
         const interval = setInterval(async () => {
             const timeLeft = endTime - Date.now();
 
@@ -216,35 +229,86 @@ client.on('messageCreate', async (message) => {
                 const fetchedMessage = await message.channel.messages.fetch(giveawayMessage.id).catch(() => null);
                 if (!fetchedMessage) return;
 
-                const reaction = fetchedMessage.reactions.cache.get('🎉');
-                if (!reaction) {
-                    return message.channel.send(`🎉 Giveaway-ul pentru **${prize}** s-a încheiat, dar nimeni nu a participat.`);
-                }
+                const participantsSet = giveawayParticipants[giveawayMessage.id] || new Set();
+                const participantsArray = Array.from(participantsSet);
 
-                const users = await reaction.users.fetch();
-                const validUsers = users.filter(u => !u.bot);
+                // Dezactivăm butonul (devine gri și nu mai poate fi apăsat)
+                const disabledButton = new ButtonBuilder()
+                    .setCustomId('enter_giveaway')
+                    .setLabel('Giveaway Încheiat ❌')
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(true);
 
-                if (validUsers.size === 0) {
+                const disabledRow = new ActionRowBuilder().addComponents(disabledButton);
+
+                if (participantsArray.length === 0) {
                     const endedEmbed = new EmbedBuilder()
                         .setTitle('🎉 GIVEAWAY ÎNCHEIAT 🎉')
                         .setColor('#7f8c8d')
-                        .setDescription(`Premiu: **${prize}**\n\n❌ Nimeni nu a participat valid la acest giveaway.`);
-                    return fetchedMessage.edit({ embeds: [endedEmbed] });
+                        .setDescription(`Premiu: **${prize}**\n\n❌ Nimeni nu a participat la acest giveaway.`);
+                    
+                    await fetchedMessage.edit({ embeds: [endedEmbed], components: [disabledRow] }).catch(() => {});
+                    delete giveawayParticipants[giveawayMessage.id];
+                    return;
                 }
 
-                const winner = validUsers.random();
+                // Alegem un câștigător aleatoriu din lista de ID-uri de utilizatori
+                const winnerId = participantsArray[Math.floor(Math.random() * participantsArray.length)];
 
                 const winnerEmbed = new EmbedBuilder()
                     .setTitle('🎉 GIVEAWAY ÎNCHEIAT 🎉')
                     .setColor('#2ecc71')
-                    .setDescription(`Premiu: **${prize}**\n\n🏆 Câștigătorul este: ${winner} ! Felicitări!`);
+                    .setDescription(`Premiu: **${prize}**\n\n🏆 Câștigătorul este: <@${winnerId}> ! Felicitări!`);
 
-                await fetchedMessage.edit({ embeds: [winnerEmbed] });
-                await message.channel.send(`🎊 Felicitări ${winner}! Ai câștigat **${prize}**!`);
+                await fetchedMessage.edit({ embeds: [winnerEmbed], components: [disabledRow] }).catch(() => {});
+                await message.channel.send(`🎊 Felicitări <@${winnerId}>! Ai câștigat **${prize}**!`).catch(() => {});
+
+                // Ștergem datele din memorie pentru acest giveaway
+                delete giveawayParticipants[giveawayMessage.id];
             }
-        }, 15000); // Verifică la fiecare 15 secunde
+        }, 10000); // Verifică la fiecare 10 secunde
+    }
+});
+
+// Gestionarea interacțiunii cu butonul (când cineva apasă „Participă”)
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isButton()) return;
+
+    if (interaction.customId === 'enter_giveaway') {
+        const messageId = interaction.message.id;
+
+        if (!giveawayParticipants[messageId]) {
+            giveawayParticipants[messageId] = new Set();
+        }
+
+        const userId = interaction.user.id;
+
+        if (giveawayParticipants[messageId].has(userId)) {
+            return interaction.reply({ content: '⚠️ Deja ești înscris la acest giveaway!', ephemeral: true });
+        }
+
+        // Adăugăm utilizatorul în listă
+        giveawayParticipants[messageId].add(userId);
+        const totalCount = giveawayParticipants[messageId].size;
+
+        // Actualizăm numărul de participanți pe embed în timp real
+        const oldEmbed = interaction.message.embeds[0];
+        if (oldEmbed) {
+            const updatedEmbed = EmbedBuilder.from(oldEmbed);
+            // Modificăm descrierea ca să actualizăm numărul de participanți
+            let desc = oldEmbed.description;
+            if (desc.includes('Participanți:')) {
+                desc = desc.replace(/Participanți: \*\*\d+\*\*/, `Participanți: **${totalCount}**`);
+            } else {
+                desc += `\nParticipanți: **${totalCount}**`;
+            }
+            updatedEmbed.setDescription(desc);
+
+            await interaction.message.edit({ embeds: [updatedEmbed] }).catch(() => {});
+        }
+
+        await interaction.reply({ content: '✅ Te-ai înscris cu succes la giveaway! Mult noroc!', ephemeral: true });
     }
 });
 
 client.login(process.env.TOKEN);
-    
