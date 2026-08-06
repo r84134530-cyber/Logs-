@@ -29,9 +29,10 @@ function saveWarns(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 4), 'utf8');
 }
 
-// Ținem evidența participanților la giveaway-uri direct în memorie
-// Structură: { messageId: Set([userId1, userId2, ...]) }
+// Ținem evidența participanților și a ultimului giveaway pentru comanda reroll
 const giveawayParticipants = {};
+let lastGiveawayMessageId = null;
+let giveawayDataStore = {}; // { messageId: { prize, channelId } }
 
 client.once('ready', () => {
     console.log(`Botul multifuncțional este online ca ${client.user.tag}!`);
@@ -165,7 +166,6 @@ client.on('messageCreate', async (message) => {
 
     // ================= SISTEMUL DE GIVEAWAY CU BUTON =================
     
-    // Exemplu: !giveaway 1h 500 Robux  (sau 30m)
     if (command === 'giveaway') {
         if (!message.member.permissions.has('Administrator') && !message.member.permissions.has('ManageMessages')) {
             return message.reply('❌ Nu ai permisiunea de a crea giveaway-uri!');
@@ -175,7 +175,7 @@ client.on('messageCreate', async (message) => {
         const prize = args.slice(1).join(' ');
 
         if (!timeArg || !prize) {
-            return message.reply('❌ Format incorect! Folosește: `!giveaway [timp] [premiu]`. Exemplu: `!giveaway 1h 500 Robux` sau `!giveaway 30m Nitro`');
+            return message.reply('❌ Format incorect! Folosește: `!giveaway [timp] [premiu]`. Exemplu: `!giveaway 1h 500 Robux`');
         }
 
         let durationMs = 0;
@@ -196,8 +196,6 @@ client.on('messageCreate', async (message) => {
 
         await message.delete().catch(() => {});
 
-        // Creăm setul de participanți pentru acest mesaj nou
-        // (Vom folosi un ID unic generat automat de mesaj după trimitere, dar pentru început pregătim rândul cu butonul)
         const giveawayEmbed = new EmbedBuilder()
             .setTitle('🎉 GIVEAWAY 🎉')
             .setColor('#e74c3c')
@@ -214,12 +212,12 @@ client.on('messageCreate', async (message) => {
 
         const giveawayMessage = await message.channel.send({ embeds: [giveawayEmbed], components: [row] });
         
-        // Inițializăm lista de participanți pentru mesajul trimis
         giveawayParticipants[giveawayMessage.id] = new Set();
+        giveawayDataStore[giveawayMessage.id] = { prize: prize, channelId: message.channel.id };
+        lastGiveawayMessageId = giveawayMessage.id;
 
         const endTime = Date.now() + durationMs;
 
-        // Timer-ul care oprește giveaway-ul la final
         const interval = setInterval(async () => {
             const timeLeft = endTime - Date.now();
 
@@ -232,7 +230,6 @@ client.on('messageCreate', async (message) => {
                 const participantsSet = giveawayParticipants[giveawayMessage.id] || new Set();
                 const participantsArray = Array.from(participantsSet);
 
-                // Dezactivăm butonul (devine gri și nu mai poate fi apăsat)
                 const disabledButton = new ButtonBuilder()
                     .setCustomId('enter_giveaway')
                     .setLabel('Giveaway Încheiat ❌')
@@ -248,11 +245,9 @@ client.on('messageCreate', async (message) => {
                         .setDescription(`Premiu: **${prize}**\n\n❌ Nimeni nu a participat la acest giveaway.`);
                     
                     await fetchedMessage.edit({ embeds: [endedEmbed], components: [disabledRow] }).catch(() => {});
-                    delete giveawayParticipants[giveawayMessage.id];
                     return;
                 }
 
-                // Alegem un câștigător aleatoriu din lista de ID-uri de utilizatori
                 const winnerId = participantsArray[Math.floor(Math.random() * participantsArray.length)];
 
                 const winnerEmbed = new EmbedBuilder()
@@ -262,15 +257,37 @@ client.on('messageCreate', async (message) => {
 
                 await fetchedMessage.edit({ embeds: [winnerEmbed], components: [disabledRow] }).catch(() => {});
                 await message.channel.send(`🎊 Felicitări <@${winnerId}>! Ai câștigat **${prize}**!`).catch(() => {});
-
-                // Ștergem datele din memorie pentru acest giveaway
-                delete giveawayParticipants[giveawayMessage.id];
             }
-        }, 10000); // Verifică la fiecare 10 secunde
+        }, 10000);
+    }
+
+    // ================= COMANDA REROLL =================
+    
+    if (command === 'reroll') {
+        if (!message.member.permissions.has('Administrator') && !message.member.permissions.has('ManageMessages')) {
+            return message.reply('❌ Nu ai permisiunea de a da reroll!');
+        }
+
+        const targetMessageId = args[0] || lastGiveawayMessageId;
+
+        if (!targetMessageId) {
+            return message.reply('❌ Nu am găsit niciun giveaway recent sau ID-ul introdus este invalid. Folosește: `!reroll [ID-ul_mesajului]`');
+        }
+
+        const participantsSet = giveawayParticipants[targetMessageId];
+
+        if (!participantsSet || participantsSet.size === 0) {
+            return message.reply('❌ Nu există participanți înregistrați pentru acest giveaway sau ID-ul este greșit!');
+        }
+
+        const participantsArray = Array.from(participantsSet);
+        const newWinnerId = participantsArray[Math.floor(Math.random() * participantsArray.length)];
+
+        await message.channel.send(`🔄 **REROLL!** Noul câștigător este: <@${newWinnerId}>! Felicitări! 🎉`);
     }
 });
 
-// Gestionarea interacțiunii cu butonul (când cineva apasă „Participă”)
+// Gestionarea interacțiunii cu butonul
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isButton()) return;
 
@@ -287,15 +304,12 @@ client.on('interactionCreate', async (interaction) => {
             return interaction.reply({ content: '⚠️ Deja ești înscris la acest giveaway!', ephemeral: true });
         }
 
-        // Adăugăm utilizatorul în listă
         giveawayParticipants[messageId].add(userId);
         const totalCount = giveawayParticipants[messageId].size;
 
-        // Actualizăm numărul de participanți pe embed în timp real
         const oldEmbed = interaction.message.embeds[0];
         if (oldEmbed) {
             const updatedEmbed = EmbedBuilder.from(oldEmbed);
-            // Modificăm descrierea ca să actualizăm numărul de participanți
             let desc = oldEmbed.description;
             if (desc.includes('Participanți:')) {
                 desc = desc.replace(/Participanți: \*\*\d+\*\*/, `Participanți: **${totalCount}**`);
@@ -312,3 +326,4 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 client.login(process.env.TOKEN);
+            
