@@ -8,7 +8,8 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildMessageReactions
     ]
 });
 
@@ -30,7 +31,7 @@ function saveWarns(data) {
 }
 
 client.once('ready', () => {
-    console.log(`Botul este online ca ${client.user.tag}!`);
+    console.log(`Botul multifuncțional este online ca ${client.user.tag}!`);
 });
 
 client.on('messageCreate', async (message) => {
@@ -42,7 +43,8 @@ client.on('messageCreate', async (message) => {
     const args = message.content.slice(prefix.length).trim().split(/ +/);
     const command = args.shift().toLowerCase();
 
-    // Comanda: !warn <@utilizator sau NumeRoblox> <motiv>
+    // ================= SISTEMUL DE WARN-URI =================
+    
     if (command === 'warn') {
         if (!message.member.permissions.has('KickMembers') && !message.member.permissions.has('Administrator')) {
             return message.reply('❌ Nu ai permisiunea de a folosi această comandă!');
@@ -50,17 +52,15 @@ client.on('messageCreate', async (message) => {
 
         const identifier = args[0];
         if (!identifier) {
-            return message.reply('❌ Te rog să menționezi un utilizator sau să scrii un username de Roblox! Exemplu: `!warn NumeRoblox motiv` sau `!warn @Mention motiv`');
+            return message.reply('❌ Te rog să menționezi un utilizator sau să scrii un username de Roblox! Exemplu: `!warn NumeRoblox motiv`');
         }
 
         const reason = args.slice(1).join(' ') || 'Fără motiv specificat';
 
-        // Căutare după mențiune, ID sau după username-ul de Discord / poreclă / text introdus
         let targetUser = message.mentions.users.first();
         let targetName = identifier;
 
         if (!targetUser) {
-            // Căutăm după username exact sau poreclă pe server (util pentru username-ul de Roblox pus la poreclă)
             const foundMember = message.guild.members.cache.find(m => 
                 m.user.username.toLowerCase() === identifier.toLowerCase() ||
                 (m.nickname && m.nickname.toLowerCase().includes(identifier.toLowerCase()))
@@ -70,7 +70,6 @@ client.on('messageCreate', async (message) => {
                 targetUser = foundMember.user;
                 targetName = foundMember.displayName;
             } else {
-                // Dacă nu există pe server sub acel nume, salvăm direct textul introdus (numele de Roblox) ca entitate
                 targetName = identifier;
             }
         } else {
@@ -79,7 +78,6 @@ client.on('messageCreate', async (message) => {
 
         let warnsData = loadWarns();
         const guildId = message.guild.id;
-        // Folosim ID-ul de Discord dacă l-am găsit, sau username-ul text (de Roblox) ca cheie unică
         const key = targetUser ? targetUser.id : identifier.toLowerCase();
 
         if (!warnsData[guildId]) {
@@ -114,7 +112,6 @@ client.on('messageCreate', async (message) => {
         await message.channel.send({ embeds: [embed] });
     }
 
-    // Comanda: !warns <@utilizator sau NumeRoblox>
     if (command === 'warns') {
         const identifier = args[0];
         let targetUser = message.mentions.users.first();
@@ -125,7 +122,6 @@ client.on('messageCreate', async (message) => {
             key = targetUser.id;
             targetName = targetUser.tag;
         } else if (identifier) {
-            // Căutăm membru după nume
             const foundMember = message.guild.members.cache.find(m => 
                 m.user.username.toLowerCase() === identifier.toLowerCase() ||
                 (m.nickname && m.nickname.toLowerCase().includes(identifier.toLowerCase()))
@@ -138,7 +134,6 @@ client.on('messageCreate', async (message) => {
                 targetName = identifier;
             }
         } else {
-            // Dacă nu a scris nimic, își vede propriile warn-uri
             key = message.author.id;
             targetName = message.author.tag;
         }
@@ -164,6 +159,92 @@ client.on('messageCreate', async (message) => {
 
         await message.channel.send({ embeds: [embed] });
     }
+
+    // ================= SISTEMUL DE GIVEAWAY (CU ORE SAU MINUTE) =================
+    
+    // Exemplu de utilizare: 
+    // !giveaway 2h 500 Robux  (pentru 2 ore)
+    // !giveaway 30m Nitro     (pentru 30 de minute)
+    if (command === 'giveaway') {
+        if (!message.member.permissions.has('Administrator') && !message.member.permissions.has('ManageMessages')) {
+            return message.reply('❌ Nu ai permisiunea de a crea giveaway-uri!');
+        }
+
+        const timeArg = args[0];
+        const prize = args.slice(1).join(' ');
+
+        if (!timeArg || !prize) {
+            return message.reply('❌ Format incorect! Folosește: `!giveaway [timp] [premiu]`. Exemplu: `!giveaway 2h 500 Robux` sau `!giveaway 30m Nitro`');
+        }
+
+        let durationMs = 0;
+        const unit = timeArg.slice(-1).toLowerCase();
+        const value = parseInt(timeArg);
+
+        if (isNaN(value)) {
+            return message.reply('❌ Timpul introdus nu este valid! Folosește `h` pentru ore sau `m` pentru minute (ex: `1h`, `30m`).');
+        }
+
+        if (unit === 'h') {
+            durationMs = value * 60 * 60 * 1000; // ore în milisecunde
+        } else if (unit === 'm') {
+            durationMs = value * 60 * 1000; // minute în milisecunde
+        } else {
+            return message.reply('❌ Specifică unitatea de măsură: `h` pentru ore sau `m` pentru minute (Exemplu: `1h` sau `15m`).');
+        }
+
+        await message.delete().catch(() => {});
+
+        const giveawayEmbed = new EmbedBuilder()
+            .setTitle('🎉 GIVEAWAY 🎉')
+            .setColor('#e74c3c')
+            .setDescription(`Premiu: **${prize}**\n\nReacționează cu 🎉 pentru a participa!\nDurată: **${timeArg}**`)
+            .setFooter({ text: `Creat de ${message.author.tag}` })
+            .setTimestamp();
+
+        const giveawayMessage = await message.channel.send({ embeds: [giveawayEmbed] });
+        await giveawayMessage.react('🎉');
+
+        const endTime = Date.now() + durationMs;
+
+        const interval = setInterval(async () => {
+            const timeLeft = endTime - Date.now();
+
+            if (timeLeft <= 0) {
+                clearInterval(interval);
+
+                const fetchedMessage = await message.channel.messages.fetch(giveawayMessage.id).catch(() => null);
+                if (!fetchedMessage) return;
+
+                const reaction = fetchedMessage.reactions.cache.get('🎉');
+                if (!reaction) {
+                    return message.channel.send(`🎉 Giveaway-ul pentru **${prize}** s-a încheiat, dar nimeni nu a participat.`);
+                }
+
+                const users = await reaction.users.fetch();
+                const validUsers = users.filter(u => !u.bot);
+
+                if (validUsers.size === 0) {
+                    const endedEmbed = new EmbedBuilder()
+                        .setTitle('🎉 GIVEAWAY ÎNCHEIAT 🎉')
+                        .setColor('#7f8c8d')
+                        .setDescription(`Premiu: **${prize}**\n\n❌ Nimeni nu a participat valid la acest giveaway.`);
+                    return fetchedMessage.edit({ embeds: [endedEmbed] });
+                }
+
+                const winner = validUsers.random();
+
+                const winnerEmbed = new EmbedBuilder()
+                    .setTitle('🎉 GIVEAWAY ÎNCHEIAT 🎉')
+                    .setColor('#2ecc71')
+                    .setDescription(`Premiu: **${prize}**\n\n🏆 Câștigătorul este: ${winner} ! Felicitări!`);
+
+                await fetchedMessage.edit({ embeds: [winnerEmbed] });
+                await message.channel.send(`🎊 Felicitări ${winner}! Ai câștigat **${prize}**!`);
+            }
+        }, 15000); // Verifică la fiecare 15 secunde
+    }
 });
 
 client.login(process.env.TOKEN);
+    
